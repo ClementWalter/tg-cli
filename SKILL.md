@@ -121,14 +121,16 @@ bin/tg send alice "running late" --yes           # actually sends
 bin/tg send alice "the deck" --file deck.pdf --yes   # send a document with caption
 ```
 
-### `tg download <query> [--limit N] [--match N] [--out DIR] [--json]`
+### `tg download <query> [--limit N] [--since ISO] [--docs-only] [--match N] [--out DIR] [--json]`
 
 Scan the last `--limit` messages of the matched chat and save every media
-attachment (photo, document, video, …) into `--out` (default `.`), using
-Telegram's own filename where available.
+attachment into `--out` (default `.`), using Telegram's own filename where
+available. Narrow with `--since` (only messages at/after the cutoff) and
+`--docs-only` (files like PDFs/decks, skipping photos and stickers).
 
 ```bash
 bin/tg download alice --limit 50 --out ./tg-media
+bin/tg download "Zama x Steakhouse" --since 2026-07-05 --docs-only --out ./tg-docs
 ```
 
 ## Notes
