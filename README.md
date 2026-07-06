@@ -20,10 +20,14 @@ the entire codebase you run is this one readable file plus those two libraries.
 bin/tg login
 
 bin/tg chats                       # list conversations
+bin/tg folders                     # list chat folders
+bin/tg folder Zama --since 2026-07-05 --json   # batch-read a whole folder, windowed
 bin/tg read alice                  # read a thread
 bin/tg search "invoice"            # global search
 bin/tg send alice "on my way"      # dry-run
 bin/tg send alice "on my way" --yes
+bin/tg send alice "the deck" --file deck.pdf --yes   # send a document
+bin/tg download alice --out ./tg-media               # save attachments
 ```
 
 ## Credentials

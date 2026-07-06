@@ -435,17 +435,25 @@ def search(text: str, chat_query: str | None, match: int, limit: int, as_json: b
 
 @cli.command()
 @click.argument("query")
-@click.argument("text")
+@click.argument("text", required=False, default="")
+@click.option("--file", "file_path", default=None, help="Attach and send this file/document; TEXT (if any) becomes its caption.")
 @click.option("--peer", "peer_override", default=None, help="Send to this exact @username / phone / id, skipping query resolution.")
 @click.option("--match", default=0, help="Pick the Nth matching chat when ambiguous (1-based).")
 @click.option("--yes", is_flag=True, help="Actually send. Without it, prints a dry-run only.")
-def send(query: str, text: str, peer_override: str | None, match: int, yes: bool) -> None:
-    """Send a message to the chat matching QUERY.
+def send(query: str, text: str, file_path: str | None, peer_override: str | None, match: int, yes: bool) -> None:
+    """Send a message (and/or a file) to the chat matching QUERY.
 
-    Defaults to a dry-run that prints the resolved recipient and text without
-    sending. Pass --yes to actually send — an outbound action the calling agent
-    must confirm with the user first.
+    With --file, sends that document; any TEXT becomes its caption. Defaults to a
+    dry-run that prints the resolved recipient and payload without sending. Pass
+    --yes to actually send — an outbound action the calling agent must confirm
+    with the user first.
     """
+    if not text and not file_path:
+        raise click.ClickException("Nothing to send: provide TEXT, --file, or both.")
+    attachment = Path(file_path).expanduser() if file_path else None
+    if attachment and not attachment.is_file():
+        raise click.ClickException(f"File not found: {attachment}")
+
     with _client() as client:
         if peer_override:
             entity = client.get_entity(peer_override)
@@ -457,11 +465,53 @@ def send(query: str, text: str, peer_override: str | None, match: int, yes: bool
         if not yes:
             click.echo("DRY-RUN (nothing sent). Re-run with --yes to send.")
             click.echo(f"  to:      {label}")
-            click.echo(f"  message: {text}")
+            if attachment:
+                click.echo(f"  file:    {attachment}")
+            if text:
+                click.echo(f"  message: {text}")
             return
 
-        client.send_message(entity, text)
-    click.echo(f"Sent to {label}.")
+        if attachment:
+            client.send_file(entity, str(attachment), caption=text or None)
+        else:
+            client.send_message(entity, text)
+    what = f"file {attachment.name}" if attachment else "message"
+    click.echo(f"Sent {what} to {label}.")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--limit", default=20, help="How many recent messages to scan for media.")
+@click.option("--match", default=0, help="Pick the Nth matching chat when ambiguous (1-based).")
+@click.option("--out", default=".", help="Directory to save attachments into (created if missing).")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def download(query: str, limit: int, match: int, out: str, as_json: bool) -> None:
+    """Download attachments from the recent messages of the chat matching QUERY.
+
+    Scans the last --limit messages of the matched chat and saves every media
+    attachment (photo, document, video, …) into --out, using Telegram's own
+    filename where available.
+    """
+    outdir = Path(out).expanduser()
+    outdir.mkdir(parents=True, exist_ok=True)
+    with _client() as client:
+        dialog = _resolve_dialog(client, query, match)
+        saved = []
+        for m in client.get_messages(dialog.entity, limit=limit):
+            if not m.media:
+                continue
+            path = client.download_media(m, file=str(outdir))
+            if path:
+                saved.append({"ts": _local(m.date), "file": path, "caption": _msg_text(m)})
+    if as_json:
+        click.echo(json.dumps(saved, ensure_ascii=False))
+        return
+    if not saved:
+        click.echo(f"No attachments found in the last {limit} messages of {dialog.name!r}.")
+        return
+    click.echo(f"Saved {len(saved)} attachment(s) from {dialog.name!r} into {outdir}:")
+    for s in saved:
+        click.echo(f"  {s['ts']}  {s['file']}")
 
 
 if __name__ == "__main__":

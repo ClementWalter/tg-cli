@@ -5,10 +5,12 @@ description:
   `bin/tg` command. Logs in as your Telegram **user account** over MTProto
   (Telethon) — not a bot — so it sees every chat your account sees. `tg login`
   authenticates once (phone + code + 2FA), `tg chats` lists conversations, `tg
-  read <name>` shows a thread, `tg search <text>` searches, `tg send <name>
-  <text>` sends one (dry-run unless `--yes`). Session and API credentials are
-  stored chmod 600 in ~/.config/tg-cli. Use when the user wants to read, search,
-  or send their personal Telegram messages."
+  folders` / `tg folder <name>` list and batch-read chat folders, `tg read
+  <name>` shows a thread, `tg search <text>` searches, `tg send <name> <text>`
+  sends a message or a `--file` document (dry-run unless `--yes`), and `tg
+  download <name>` saves attachments. Session and API credentials are stored
+  chmod 600 in ~/.config/tg-cli. Use when the user wants to read, search, send,
+  or download their personal Telegram messages and attachments."
 ---
 
 # Telegram reader / sender CLI
@@ -106,15 +108,27 @@ Search messages containing `<text>`. With `--chat` it searches that one
 conversation (single exact request); without it, a best-effort global search
 across all chats.
 
-### `tg send <query> <text> [--match N] [--peer P] [--yes]`
+### `tg send <query> [text] [--file PATH] [--match N] [--peer P] [--yes]`
 
-Send to the chat matching `<query>`. **Defaults to a dry-run** printing the
-resolved recipient and text; pass `--yes` to actually send. Target an exact
-recipient with `--peer @username` / phone / id, or disambiguate with `--match`.
+Send to the chat matching `<query>`. With `--file` it sends that document and any
+`text` becomes the caption. **Defaults to a dry-run** printing the resolved
+recipient and payload; pass `--yes` to actually send. Target an exact recipient
+with `--peer @username` / phone / id, or disambiguate with `--match`.
 
 ```bash
-bin/tg send alice "running late"          # dry-run: shows recipient + text
-bin/tg send alice "running late" --yes    # actually sends
+bin/tg send alice "running late"                 # dry-run: shows recipient + text
+bin/tg send alice "running late" --yes           # actually sends
+bin/tg send alice "the deck" --file deck.pdf --yes   # send a document with caption
+```
+
+### `tg download <query> [--limit N] [--match N] [--out DIR] [--json]`
+
+Scan the last `--limit` messages of the matched chat and save every media
+attachment (photo, document, video, …) into `--out` (default `.`), using
+Telegram's own filename where available.
+
+```bash
+bin/tg download alice --limit 50 --out ./tg-media
 ```
 
 ## Notes
