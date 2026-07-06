@@ -174,17 +174,25 @@ def login(api_id: str | None, api_hash: str | None) -> None:
         stored = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
         api_id = api_id or (str(stored["api_id"]) if "api_id" in stored else None)
         api_hash = api_hash or stored.get("api_hash")
+    # hide_input keeps every secret off the screen (and thus out of terminal
+    # scrollback): the api_hash, phone, and login code are as sensitive as the
+    # 2FA password, so none of them are ever echoed.
     if not api_id:
-        api_id = click.prompt("api_id (from my.telegram.org)")
+        api_id = click.prompt("api_id (from my.telegram.org)", hide_input=True)
     if not api_hash:
-        api_hash = click.prompt("api_hash (from my.telegram.org)")
+        api_hash = click.prompt("api_hash (from my.telegram.org)", hide_input=True)
 
     CONFIG_FILE.write_text(json.dumps({"api_id": int(api_id), "api_hash": api_hash}))
     _lock_down(CONFIG_FILE)
 
     client = TelegramClient(str(SESSION_BASE), int(api_id), api_hash)
-    # start() drives the interactive phone / code / 2FA-password prompts.
-    client.start()
+    # Drive Telethon's interactive login through masked prompts rather than its
+    # default plaintext input() for phone and code.
+    client.start(
+        phone=lambda: click.prompt("phone number (e.g. +33…)", hide_input=True),
+        code_callback=lambda: click.prompt("login code Telegram sent you", hide_input=True),
+        password=lambda: click.prompt("2FA password", hide_input=True),
+    )
     _lock_down(Path(str(SESSION_BASE) + ".session"))
     me = client.get_me()
     client.disconnect()
