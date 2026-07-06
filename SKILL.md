@@ -70,6 +70,25 @@ Show the logged-in account (name, username, id).
 List conversations, most recent first, each tagged `[dm]` / `[group]` /
 `[channel]` with an unread count.
 
+### `tg folders [--json]`
+
+List chat folders (Telegram "chat folders" / dialog filters) and how many chats
+each explicitly contains.
+
+### `tg folder <name> [--since ISO] [--limit N] [--json]`
+
+Read recent messages from **every chat in the folder** matching `<name>`,
+windowed by `--since` (ISO date/datetime, UTC if no tz). This is the batch
+building block for digest jobs: it enumerates the folder's chats, fetches each
+chat's recent messages, and keeps those at/after the cutoff. In `--json` each
+message carries an `epoch` (Unix seconds) so a caller can filter precisely
+against its own cutoff.
+
+```bash
+bin/tg folders                              # list folders + chat counts
+bin/tg folder Zama --since 2026-07-05 --json
+```
+
 ### `tg read <query> [--limit N] [--match N] [--json]`
 
 Show messages from the chat whose name best matches `<query>` (case-insensitive

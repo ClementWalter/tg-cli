@@ -37,6 +37,7 @@ import os
 import stat
 import sys
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -143,6 +144,33 @@ def _local(dt) -> str:
     return dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else ""
 
 
+def _parse_since(value: str | None) -> datetime | None:
+    """Parse an ISO date/datetime cutoff; naive values are read as UTC."""
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _dialog_filters(client):
+    """Return the account's chat folders (DialogFilter objects)."""
+    res = client(functions.messages.GetDialogFiltersRequest())
+    # Newer Telethon wraps the list in a DialogFilters container; older returns it raw.
+    return res.filters if hasattr(res, "filters") else res
+
+
+def _folder_title(f) -> str:
+    # The title is a TextWithEntities in recent layers, a plain str before that.
+    return f.title.text if hasattr(f.title, "text") else f.title
+
+
+def _folder_peers(f) -> list:
+    """Peers explicitly placed in a folder (pinned + included), de-duplicated."""
+    return list(getattr(f, "pinned_peers", []) or []) + list(
+        getattr(f, "include_peers", []) or []
+    )
+
+
 def _msg_text(msg) -> str:
     if msg.message:
         return msg.message
@@ -247,6 +275,77 @@ def chats(limit: int, as_json: bool) -> None:
     for c in out:
         badge = f" ({c['unread']} unread)" if c["unread"] else ""
         click.echo(f"{c['last']}  [{c['kind']}] {c['name']}{badge}")
+
+
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def folders(as_json: bool) -> None:
+    """List chat folders and how many chats each explicitly contains."""
+    with _client() as client:
+        out = [
+            {"title": _folder_title(f), "chats": len(_folder_peers(f))}
+            for f in _dialog_filters(client)
+            if not isinstance(f, types.DialogFilterDefault)
+        ]
+    if as_json:
+        click.echo(json.dumps(out, ensure_ascii=False))
+        return
+    for f in out:
+        click.echo(f"{f['chats']:>3}  {f['title']}")
+
+
+@cli.command()
+@click.argument("name")
+@click.option("--since", default=None, help="ISO date/datetime; keep only messages at/after it (UTC if no tz).")
+@click.option("--limit", default=100, help="Max messages fetched per chat before the --since filter.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def folder(name: str, since: str | None, limit: int, as_json: bool) -> None:
+    """Read recent messages from every chat in the folder matching NAME.
+
+    Windowed batch read across a whole folder — the building block a digest job
+    uses: enumerate the folder's chats, fetch each chat's recent messages, and
+    keep those at/after --since. Each message carries an `epoch` field so a
+    caller can filter precisely against its own cutoff.
+    """
+    cutoff = _parse_since(since)
+    needle = name.lower()
+    with _client() as client:
+        chosen = next(
+            (
+                f
+                for f in _dialog_filters(client)
+                if not isinstance(f, types.DialogFilterDefault)
+                and needle in (_folder_title(f) or "").lower()
+            ),
+            None,
+        )
+        if chosen is None:
+            raise click.ClickException(f"No folder matches {name!r}.")
+        out = []
+        for peer in _folder_peers(chosen):
+            entity = client.get_entity(peer)
+            messages = client.get_messages(entity, limit=limit)
+            rows = [
+                {
+                    "ts": _local(m.date),
+                    "epoch": int(m.date.timestamp()),
+                    "sender": "me" if m.out else utils.get_display_name(m.sender)
+                    or str(m.sender_id),
+                    "text": _msg_text(m),
+                }
+                for m in reversed(messages)
+                if cutoff is None or m.date >= cutoff
+            ]
+            out.append({"chat": utils.get_display_name(entity), "messages": rows})
+    if as_json:
+        click.echo(json.dumps(out, ensure_ascii=False))
+        return
+    for chat in out:
+        if not chat["messages"]:
+            continue
+        click.echo(f"\n# {chat['chat']} — {len(chat['messages'])} messages")
+        for m in chat["messages"]:
+            click.echo(f"{m['ts']}  {m['sender']}: {m['text']}")
 
 
 @cli.command()
