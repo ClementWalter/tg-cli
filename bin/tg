@@ -1,0 +1,361 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "click==8.3.3",
+#     "telethon==1.44.0",
+# ]
+# ///
+"""Read and send your own Telegram chats from the terminal via your user account.
+
+This is the Telegram counterpart to the WhatsApp / iMessage / Slack personal
+CLIs: list conversations, read a thread, search, send. It logs in as **your
+Telegram user account** over MTProto (Telethon), so it sees exactly what your
+account sees — not a bot, which could only read chats it was explicitly added to.
+
+Two facts drive the design and the security posture:
+
+* **The session file is a credential.** After `login`, Telethon stores an
+  authenticated session at `~/.config/tg-cli/session.session`. Anyone with that
+  file (or your `api_id`/`api_hash`) can act as your account, so both are written
+  `chmod 600` inside a `chmod 700` config dir, and kept out of the repo. Revoke a
+  leaked session anytime from the Telegram app: Settings → Devices → terminate.
+* **api_id / api_hash are per-developer, not per-account.** They come from
+  my.telegram.org (My Applications) and identify the client app, not you. They
+  are read from `~/.config/tg-cli/config.json` or the `TG_API_ID` / `TG_API_HASH`
+  environment variables; `login` prompts for them once and stores them.
+
+Reading is non-destructive. Only `send --yes` writes anything (an outgoing
+message) — an outbound action the calling agent must confirm with the user first.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import stat
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+
+import click
+from telethon.sync import TelegramClient
+from telethon import utils
+from telethon.tl import functions, types
+
+logging.basicConfig(
+    level=logging.WARNING, format="%(levelname)s: %(message)s", stream=sys.stderr
+)
+# Telethon logs connection churn at INFO; keep the CLI's stderr clean.
+logging.getLogger("telethon").setLevel(logging.ERROR)
+log = logging.getLogger("tg")
+
+# Config dir is overridable so tests (and throwaway logins) never touch the real
+# session. The session basename is passed to Telethon, which appends `.session`.
+CONFIG_DIR = Path(os.environ.get("TG_CONFIG_DIR", Path.home() / ".config" / "tg-cli"))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+SESSION_BASE = CONFIG_DIR / "session"
+
+
+def _secure_dir() -> None:
+    """Ensure the config dir exists and is private (0700)."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.chmod(stat.S_IRWXU)  # rwx for owner only
+
+
+def _lock_down(path: Path) -> None:
+    """Restrict a credential file to owner read/write (0600)."""
+    if path.exists():
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+def _load_credentials() -> tuple[int, str]:
+    """Return (api_id, api_hash) from env or the stored config, else fail cleanly.
+
+    Environment wins over the file so a caller can inject creds without writing
+    them to disk. Missing creds are a login-time concern, so the message points
+    at `tg login` rather than dumping setup steps on every command.
+    """
+    env_id, env_hash = os.environ.get("TG_API_ID"), os.environ.get("TG_API_HASH")
+    if env_id and env_hash:
+        return int(env_id), env_hash
+    if CONFIG_FILE.exists():
+        cfg = json.loads(CONFIG_FILE.read_text())
+        return int(cfg["api_id"]), cfg["api_hash"]
+    raise click.ClickException(
+        "No API credentials found. Run `tg login` and provide the api_id / "
+        "api_hash from https://my.telegram.org (API development tools)."
+    )
+
+
+@contextmanager
+def _client():
+    """Yield a connected, authorized client; raise if not logged in.
+
+    Kept separate from `login` because every other command must fail fast with a
+    clear instruction rather than dropping into an interactive auth prompt.
+    """
+    api_id, api_hash = _load_credentials()
+    # Telethon opens (and may create) the session SQLite file eagerly, so the
+    # config dir must exist even before a successful login.
+    _secure_dir()
+    client = TelegramClient(str(SESSION_BASE), api_id, api_hash)
+    client.connect()
+    try:
+        if not client.is_user_authorized():
+            raise click.ClickException("Not logged in. Run `tg login` first.")
+        yield client
+    finally:
+        client.disconnect()
+
+
+def _kind(dialog) -> str:
+    if dialog.is_user:
+        return "dm"
+    if dialog.is_channel and not dialog.is_group:
+        return "channel"
+    return "group"
+
+
+def _resolve_dialog(client, query: str, match: int):
+    """Return the single dialog best matching QUERY, or exit with a picker.
+
+    Matching is a case-insensitive substring test over the dialog name — the same
+    fuzzy behaviour as the iMessage/WhatsApp CLIs. Ambiguity is surfaced (numbered
+    list on stderr) rather than guessed, so an agent never silently targets the
+    wrong chat; `--match N` disambiguates.
+    """
+    needle = query.lower()
+    candidates = [d for d in client.get_dialogs() if needle in (d.name or "").lower()]
+    if not candidates:
+        raise click.ClickException(f"No conversation matches {query!r}.")
+    if len(candidates) > 1 and not match:
+        click.echo(f"Multiple matches for {query!r} — pick with --match N:", err=True)
+        for i, d in enumerate(candidates[:20], 1):
+            click.echo(f"  {i}. {d.name}  [{_kind(d)}]", err=True)
+        raise SystemExit(1)
+    return candidates[match - 1 if match else 0]
+
+
+def _local(dt) -> str:
+    """Format a Telegram (UTC-aware) datetime in local time."""
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else ""
+
+
+def _msg_text(msg) -> str:
+    if msg.message:
+        return msg.message
+    if msg.media:
+        return f"[{type(msg.media).__name__}]"
+    if msg.action:
+        return f"[{type(msg.action).__name__}]"
+    return ""
+
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+def cli() -> None:
+    """Read and send your own Telegram chats (user account, via Telethon)."""
+
+
+@cli.command()
+@click.option("--api-id", "api_id", default=None, help="Telegram api_id (else prompted/stored).")
+@click.option("--api-hash", "api_hash", default=None, help="Telegram api_hash (else prompted/stored).")
+def login(api_id: str | None, api_hash: str | None) -> None:
+    """Authenticate this device as your Telegram user account (one-time).
+
+    Prompts for the api_id / api_hash (from https://my.telegram.org) if not
+    already stored, then runs Telethon's interactive login: it asks for your
+    phone number, the login code Telegram sends you, and your 2FA password if one
+    is set. The resulting session is stored `chmod 600` in the config dir.
+    """
+    _secure_dir()
+    if not (api_id and api_hash):
+        stored = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+        api_id = api_id or (str(stored["api_id"]) if "api_id" in stored else None)
+        api_hash = api_hash or stored.get("api_hash")
+    if not api_id:
+        api_id = click.prompt("api_id (from my.telegram.org)")
+    if not api_hash:
+        api_hash = click.prompt("api_hash (from my.telegram.org)")
+
+    CONFIG_FILE.write_text(json.dumps({"api_id": int(api_id), "api_hash": api_hash}))
+    _lock_down(CONFIG_FILE)
+
+    client = TelegramClient(str(SESSION_BASE), int(api_id), api_hash)
+    # start() drives the interactive phone / code / 2FA-password prompts.
+    client.start()
+    _lock_down(Path(str(SESSION_BASE) + ".session"))
+    me = client.get_me()
+    client.disconnect()
+    click.echo(f"Logged in as {utils.get_display_name(me)} (@{me.username or me.id}).")
+
+
+@cli.command()
+def logout() -> None:
+    """Revoke this session server-side and delete the local session file."""
+    with _client() as client:
+        client.log_out()
+    session = Path(str(SESSION_BASE) + ".session")
+    session.unlink(missing_ok=True)
+    click.echo("Logged out; session revoked and local session file removed.")
+
+
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def whoami(as_json: bool) -> None:
+    """Show the logged-in account."""
+    with _client() as client:
+        me = client.get_me()
+    info = {
+        "id": me.id,
+        "name": utils.get_display_name(me),
+        "username": me.username,
+        "phone": me.phone,
+    }
+    click.echo(json.dumps(info, ensure_ascii=False) if as_json else
+               f"{info['name']} (@{info['username'] or info['id']})")
+
+
+@cli.command()
+@click.option("--limit", default=30, help="Number of conversations to list.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def chats(limit: int, as_json: bool) -> None:
+    """List conversations, most recent first."""
+    with _client() as client:
+        dialogs = client.get_dialogs(limit=limit)
+        out = [
+            {
+                "last": _local(d.date),
+                "name": d.name,
+                "kind": _kind(d),
+                "unread": d.unread_count,
+            }
+            for d in dialogs
+        ]
+    if as_json:
+        click.echo(json.dumps(out, ensure_ascii=False))
+        return
+    for c in out:
+        badge = f" ({c['unread']} unread)" if c["unread"] else ""
+        click.echo(f"{c['last']}  [{c['kind']}] {c['name']}{badge}")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--limit", default=50, help="Number of messages to show.")
+@click.option("--match", default=0, help="Pick the Nth match when ambiguous (1-based).")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def read(query: str, limit: int, match: int, as_json: bool) -> None:
+    """Read messages from the chat best matching QUERY (name substring)."""
+    with _client() as client:
+        dialog = _resolve_dialog(client, query, match)
+        messages = client.get_messages(dialog.entity, limit=limit)
+        out = [
+            {
+                "ts": _local(m.date),
+                "sender": "me" if m.out else utils.get_display_name(m.sender)
+                or str(m.sender_id),
+                "text": _msg_text(m),
+            }
+            for m in reversed(messages)
+        ]
+        title = dialog.name
+    if as_json:
+        click.echo(json.dumps(out, ensure_ascii=False))
+        return
+    click.echo(f"# {title} — {len(out)} messages\n")
+    for m in out:
+        click.echo(f"{m['ts']}  {m['sender']}: {m['text']}")
+
+
+@cli.command()
+@click.argument("text")
+@click.option("--chat", "chat_query", default=None, help="Restrict to the chat matching this name (reliable, single request).")
+@click.option("--match", default=0, help="Pick the Nth chat match when --chat is ambiguous.")
+@click.option("--limit", default=50, help="Number of matches to show.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def search(text: str, chat_query: str | None, match: int, limit: int, as_json: bool) -> None:
+    """Search messages containing TEXT.
+
+    With --chat, searches that one conversation (one API call, exact). Without it,
+    runs a best-effort global search across all your chats via Telegram's global
+    search endpoint.
+    """
+    with _client() as client:
+        if chat_query:
+            dialog = _resolve_dialog(client, chat_query, match)
+            messages = client.get_messages(dialog.entity, search=text, limit=limit)
+            out = [
+                {"ts": _local(m.date), "chat": dialog.name, "text": _msg_text(m)}
+                for m in messages
+            ]
+        else:
+            result = client(
+                functions.messages.SearchGlobalRequest(
+                    q=text,
+                    filter=types.InputMessagesFilterEmpty(),
+                    min_date=None,
+                    max_date=None,
+                    offset_rate=0,
+                    offset_peer=types.InputPeerEmpty(),
+                    offset_id=0,
+                    limit=limit,
+                )
+            )
+            # The response bundles the peers referenced by the hits; map raw ids
+            # to names so each result shows which chat it came from.
+            names = {u.id: utils.get_display_name(u) for u in result.users}
+            names.update({c.id: utils.get_display_name(c) for c in result.chats})
+
+            def _peer_name(peer) -> str:
+                for attr in ("user_id", "chat_id", "channel_id"):
+                    pid = getattr(peer, attr, None)
+                    if pid is not None:
+                        return names.get(pid, str(pid))
+                return "?"
+
+            out = [
+                {"ts": _local(m.date), "chat": _peer_name(m.peer_id), "text": _msg_text(m)}
+                for m in result.messages
+            ]
+    if as_json:
+        click.echo(json.dumps(out, ensure_ascii=False))
+        return
+    for m in out:
+        click.echo(f"{m['ts']}  {m['chat']}: {m['text']}")
+
+
+@cli.command()
+@click.argument("query")
+@click.argument("text")
+@click.option("--peer", "peer_override", default=None, help="Send to this exact @username / phone / id, skipping query resolution.")
+@click.option("--match", default=0, help="Pick the Nth matching chat when ambiguous (1-based).")
+@click.option("--yes", is_flag=True, help="Actually send. Without it, prints a dry-run only.")
+def send(query: str, text: str, peer_override: str | None, match: int, yes: bool) -> None:
+    """Send a message to the chat matching QUERY.
+
+    Defaults to a dry-run that prints the resolved recipient and text without
+    sending. Pass --yes to actually send — an outbound action the calling agent
+    must confirm with the user first.
+    """
+    with _client() as client:
+        if peer_override:
+            entity = client.get_entity(peer_override)
+            label = utils.get_display_name(entity) or peer_override
+        else:
+            dialog = _resolve_dialog(client, query, match)
+            entity, label = dialog.entity, dialog.name
+
+        if not yes:
+            click.echo("DRY-RUN (nothing sent). Re-run with --yes to send.")
+            click.echo(f"  to:      {label}")
+            click.echo(f"  message: {text}")
+            return
+
+        client.send_message(entity, text)
+    click.echo(f"Sent to {label}.")
+
+
+if __name__ == "__main__":
+    cli()
