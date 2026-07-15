@@ -5,7 +5,9 @@ description:
   `bin/tg` command. Logs in as your Telegram **user account** over MTProto
   (Telethon) — not a bot — so it sees every chat your account sees. `tg login`
   authenticates once (phone + code + 2FA), `tg chats` lists conversations, `tg
-  folders` / `tg folder <name>` list and batch-read chat folders, `tg read
+  folders` / `tg folder <name>` list and batch-read chat folders, `tg folder-add
+  <folder> <chat>` folds a chat into a folder (dry-run unless `--yes`) and `tg
+  chats --not-in-folder <folder>` finds chats sitting outside one, `tg read
   <name>` shows a thread, `tg search <text>` searches, `tg send <name> <text>`
   sends a message or a `--file` document (dry-run unless `--yes`), and `tg
   download <name>` saves attachments. Session and API credentials are stored
@@ -67,10 +69,17 @@ Interactive one-time authentication (see above).
 
 Show the logged-in account (name, username, id).
 
-### `tg chats [--limit N] [--json]`
+### `tg chats [--limit N] [--not-in-folder NAME] [--json]`
 
 List conversations, most recent first, each tagged `[dm]` / `[group]` /
-`[channel]` with an unread count.
+`[channel]` with an unread count. `--not-in-folder NAME` restricts the listing to
+chats **not** already in the named folder — the way a folder-scoped digest job
+spots a newly-joined partner group sitting outside its curated folder (which a
+folder-only sweep would otherwise miss).
+
+```bash
+bin/tg chats --not-in-folder Zama --limit 60 --json   # recent chats outside the Zama folder
+```
 
 ### `tg folders [--json]`
 
@@ -89,6 +98,22 @@ against its own cutoff.
 ```bash
 bin/tg folders                              # list folders + chat counts
 bin/tg folder Zama --since 2026-07-05 --json
+```
+
+### `tg folder-add <folder> <query> [--match N] [--yes] [--json]`
+
+Add the chat matching `<query>` into the folder matching `<folder>`. This edits
+your account's **folder layout only** — never any chat's messages — and
+**defaults to a dry-run**; pass `--yes` to apply. Idempotent: a chat already in
+the folder is left untouched (`already_in_folder: true`). Use it to fold a
+newly-joined partner group into a curated folder so folder-scoped digests stop
+missing it. Only plain folders are editable (not "All chats", not shared/invite
+folders). Gate auto-adds to real partner **groups** (e.g. `X <> Zama`,
+`Zama x Y`) — don't sweep in public channels or unrelated personal groups.
+
+```bash
+bin/tg folder-add Zama "Zama x Ember"          # dry-run: shows the proposed add
+bin/tg folder-add Zama "Zama x Ember" --yes    # actually add it to the folder
 ```
 
 ### `tg read <query> [--limit N] [--match N] [--json]`

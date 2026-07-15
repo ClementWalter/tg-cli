@@ -171,6 +171,36 @@ def _folder_peers(f) -> list:
     )
 
 
+def _peer_id(peer) -> int | None:
+    """Canonical numeric id for a peer/entity, comparable across InputPeer forms."""
+    try:
+        return utils.get_peer_id(peer)
+    except Exception:
+        return None
+
+
+def _resolve_folder(client, name: str):
+    """Return the single **editable** folder matching NAME, else exit.
+
+    Only plain `DialogFilter` folders are editable here: `DialogFilterDefault`
+    (All chats) has no membership, and `DialogFilterChatlist` (a shared/invite
+    folder) is not owned by this account so its peer list can't be rewritten.
+    """
+    needle = name.lower()
+    chosen = next(
+        (
+            f
+            for f in _dialog_filters(client)
+            if isinstance(f, types.DialogFilter)
+            and needle in (_folder_title(f) or "").lower()
+        ),
+        None,
+    )
+    if chosen is None:
+        raise click.ClickException(f"No editable folder matches {name!r}.")
+    return chosen
+
+
 def _msg_text(msg) -> str:
     if msg.message:
         return msg.message
@@ -255,11 +285,21 @@ def whoami(as_json: bool) -> None:
 
 @cli.command()
 @click.option("--limit", default=30, help="Number of conversations to list.")
+@click.option("--not-in-folder", "not_in_folder", default=None, help="Only list chats NOT already in the folder matching this name — spot newly-joined partner groups sitting outside a curated folder.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
-def chats(limit: int, as_json: bool) -> None:
-    """List conversations, most recent first."""
+def chats(limit: int, not_in_folder: str | None, as_json: bool) -> None:
+    """List conversations, most recent first.
+
+    With --not-in-folder, restrict the listing to chats that are NOT members of
+    the named folder. A folder-scoped digest job uses this to catch partner
+    groups you were just added to that never landed in the curated folder (and
+    would otherwise be missed by a folder-only sweep).
+    """
     with _client() as client:
         dialogs = client.get_dialogs(limit=limit)
+        exclude: set = set()
+        if not_in_folder:
+            exclude = {_peer_id(p) for p in _folder_peers(_resolve_folder(client, not_in_folder))}
         out = [
             {
                 "last": _local(d.date),
@@ -268,6 +308,7 @@ def chats(limit: int, as_json: bool) -> None:
                 "unread": d.unread_count,
             }
             for d in dialogs
+            if not not_in_folder or _peer_id(d.entity) not in exclude
         ]
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False))
@@ -292,6 +333,53 @@ def folders(as_json: bool) -> None:
         return
     for f in out:
         click.echo(f"{f['chats']:>3}  {f['title']}")
+
+
+@cli.command(name="folder-add")
+@click.argument("folder")
+@click.argument("query")
+@click.option("--match", default=0, help="Pick the Nth matching chat when QUERY is ambiguous (1-based).")
+@click.option("--yes", is_flag=True, help="Actually apply. Without it, prints a dry-run only.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def folder_add(folder: str, query: str, match: int, yes: bool, as_json: bool) -> None:
+    """Add the chat matching QUERY into the chat folder matching FOLDER.
+
+    A write to your account's folder layout (never to any chat's messages), so it
+    defaults to a dry-run; pass --yes to apply. Idempotent — a chat already in the
+    folder is left untouched. Use it to fold a newly-joined partner group into a
+    curated folder so a folder-scoped digest stops missing it.
+    """
+    with _client() as client:
+        chosen = _resolve_folder(client, folder)
+        dialog = _resolve_dialog(client, query, match)
+        target_id = _peer_id(dialog.entity)
+        existing = {_peer_id(p) for p in _folder_peers(chosen)}
+        result = {
+            "folder": _folder_title(chosen),
+            "chat": dialog.name,
+            "already_in_folder": target_id in existing,
+            "added": False,
+        }
+        if result["already_in_folder"]:
+            click.echo(json.dumps(result, ensure_ascii=False) if as_json else
+                       f"{dialog.name!r} is already in folder {result['folder']!r}.")
+            return
+        if not yes:
+            result["dry_run"] = True
+            if as_json:
+                click.echo(json.dumps(result, ensure_ascii=False))
+            else:
+                click.echo("DRY-RUN (folder unchanged). Re-run with --yes to apply.")
+                click.echo(f"  add: {dialog.name!r}  →  folder {result['folder']!r}")
+            return
+        # Append the new peer to include_peers and push the whole filter back.
+        chosen.include_peers = list(getattr(chosen, "include_peers", []) or []) + [
+            client.get_input_entity(dialog.entity)
+        ]
+        client(functions.messages.UpdateDialogFilterRequest(id=chosen.id, filter=chosen))
+        result["added"] = True
+        click.echo(json.dumps(result, ensure_ascii=False) if as_json else
+                   f"Added {dialog.name!r} to folder {result['folder']!r}.")
 
 
 @cli.command()
