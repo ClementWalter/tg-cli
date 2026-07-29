@@ -10,31 +10,31 @@ personal DMs, so a user-account client is the only way to read your own history.
 
 ## Install / run
 
-`bin/tg` is a single self-contained script run via
+`tg` is a single self-contained script run via
 [uv](https://docs.astral.sh/uv/) with inline PEP 723 dependencies — no virtualenv
 setup. The only dependencies are `click` and `telethon`, both version-pinned, so
 the entire codebase you run is this one readable file plus those two libraries.
 
 ```bash
 # one-time login (prompts for api_id/api_hash, then phone + code + 2FA)
-bin/tg login
+tg login
 
-bin/tg chats                       # list conversations
-bin/tg folders                     # list chat folders
-bin/tg folder Zama --since 2026-07-05 --json   # batch-read a whole folder, windowed
-bin/tg read alice                  # read a thread
-bin/tg search "invoice"            # global search
-bin/tg send alice "on my way"      # dry-run
-bin/tg send alice "on my way" --yes
-bin/tg send alice "the deck" --file deck.pdf --yes   # send a document
-bin/tg download alice --out ./tg-media               # save attachments
+tg chats                       # list conversations
+tg folders                     # list chat folders
+tg folder Zama --since 2026-07-05 --json   # batch-read a whole folder, windowed
+tg read alice                  # read a thread
+tg search "invoice"            # global search
+tg send alice "on my way"      # dry-run
+tg send alice "on my way" --yes
+tg send alice "the deck" --file deck.pdf --yes   # send a document
+tg download alice --out ./tg-media               # save attachments
 ```
 
 ## Credentials
 
 1. Create an app at <https://my.telegram.org> → *API development tools* to get an
    `api_id` and `api_hash` (these identify the client, not the account).
-2. `bin/tg login` stores them and the authenticated session `chmod 600` under
+2. `tg login` stores them and the authenticated session `chmod 600` under
    `~/.config/tg-cli/` (a `chmod 700` dir). Override the location with
    `TG_CONFIG_DIR`, or inject creds via `TG_API_ID` / `TG_API_HASH`.
 

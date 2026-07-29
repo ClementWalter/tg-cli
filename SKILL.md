@@ -2,7 +2,7 @@
 name: tg-cli
 description:
   "Read and send your own Telegram chats from the terminal via the bundled
-  `bin/tg` command. Logs in as your Telegram **user account** over MTProto
+  `tg` command. Logs in as your Telegram **user account** over MTProto
   (Telethon) — not a bot — so it sees every chat your account sees. `tg login`
   authenticates once (phone + code + 2FA), `tg chats` lists conversations, `tg
   folders` / `tg folder <name>` list and batch-read chat folders, `tg folder-add
@@ -24,16 +24,28 @@ explicitly added to.
 
 ## How to invoke
 
-Run the bundled launcher **`bin/tg`** (PEP 723 — `uv` resolves deps inline on
-first run: `click` + `telethon`). Resolve `bin/tg` against this skill's
-directory; from elsewhere use the absolute path.
+Invoke it as **`tg`** — on `$PATH` via a symlink in `~/.local/bin` onto this
+repo's `bin/tg`, so it always runs the current checkout: a `git pull`, or even
+an uncommitted edit, takes effect immediately with nothing to reinstall.
+
+```bash
+tg chats
+```
+
+Examples in this doc are written that way. If `tg` is not on `$PATH`, run the
+bundled launcher `bin/tg` resolved against this skill's own directory (PEP 723
+— `uv` resolves deps inline on first run: `click` + `telethon`), or link it once:
+
+```bash
+ln -sfn <skill-dir>/bin/tg ~/.local/bin/tg
+```
 
 ## Prerequisite: log in (one-time)
 
 1. Get an **api_id** and **api_hash** from <https://my.telegram.org> → *API
    development tools*. These identify the client app, not your account, and are
    reused across logins.
-2. Run `bin/tg login`. It prompts for the api_id / api_hash (stored after the
+2. Run `tg login`. It prompts for the api_id / api_hash (stored after the
    first time), then for your **phone number**, the **login code** Telegram
    sends you, and your **2FA password** if you have one set.
 
@@ -78,7 +90,7 @@ spots a newly-joined partner group sitting outside its curated folder (which a
 folder-only sweep would otherwise miss).
 
 ```bash
-bin/tg chats --not-in-folder Zama --limit 60 --json   # recent chats outside the Zama folder
+tg chats --not-in-folder Zama --limit 60 --json   # recent chats outside the Zama folder
 ```
 
 ### `tg folders [--json]`
@@ -96,8 +108,8 @@ message carries an `epoch` (Unix seconds) so a caller can filter precisely
 against its own cutoff.
 
 ```bash
-bin/tg folders                              # list folders + chat counts
-bin/tg folder Zama --since 2026-07-05 --json
+tg folders                              # list folders + chat counts
+tg folder Zama --since 2026-07-05 --json
 ```
 
 ### `tg folder-add <folder> <query> [--match N] [--yes] [--json]`
@@ -112,8 +124,8 @@ folders). Gate auto-adds to real partner **groups** (e.g. `X <> Zama`,
 `Zama x Y`) — don't sweep in public channels or unrelated personal groups.
 
 ```bash
-bin/tg folder-add Zama "Zama x Ember"          # dry-run: shows the proposed add
-bin/tg folder-add Zama "Zama x Ember" --yes    # actually add it to the folder
+tg folder-add Zama "Zama x Ember"          # dry-run: shows the proposed add
+tg folder-add Zama "Zama x Ember" --yes    # actually add it to the folder
 ```
 
 ### `tg read <query> [--limit N] [--match N] [--json]`
@@ -122,9 +134,9 @@ Show messages from the chat whose name best matches `<query>` (case-insensitive
 substring). Ambiguous matches print a numbered list — pick one with `--match N`.
 
 ```bash
-bin/tg read alice              # most likely "Alice" chat
-bin/tg read "Dev Team" --limit 200
-bin/tg read alice --match 2    # 2nd match when ambiguous
+tg read alice              # most likely "Alice" chat
+tg read "Dev Team" --limit 200
+tg read alice --match 2    # 2nd match when ambiguous
 ```
 
 ### `tg search <text> [--chat QUERY] [--match N] [--limit N] [--json]`
@@ -141,9 +153,9 @@ recipient and payload; pass `--yes` to actually send. Target an exact recipient
 with `--peer @username` / phone / id, or disambiguate with `--match`.
 
 ```bash
-bin/tg send alice "running late"                 # dry-run: shows recipient + text
-bin/tg send alice "running late" --yes           # actually sends
-bin/tg send alice "the deck" --file deck.pdf --yes   # send a document with caption
+tg send alice "running late"                 # dry-run: shows recipient + text
+tg send alice "running late" --yes           # actually sends
+tg send alice "the deck" --file deck.pdf --yes   # send a document with caption
 ```
 
 ### `tg download <query> [--limit N] [--since ISO] [--docs-only] [--match N] [--out DIR] [--json]`
@@ -154,8 +166,8 @@ available. Narrow with `--since` (only messages at/after the cutoff) and
 `--docs-only` (files like PDFs/decks, skipping photos and stickers).
 
 ```bash
-bin/tg download alice --limit 50 --out ./tg-media
-bin/tg download "Zama x Steakhouse" --since 2026-07-05 --docs-only --out ./tg-docs
+tg download alice --limit 50 --out ./tg-media
+tg download "Zama x Steakhouse" --since 2026-07-05 --docs-only --out ./tg-docs
 ```
 
 ## Notes
