@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+from types import SimpleNamespace
 from telethon.sync import TelegramClient
 from telethon import utils
 from telethon.tl import functions, types
@@ -119,6 +120,9 @@ def _kind(dialog) -> str:
     return "group"
 
 
+SELF_ALIASES = {"me", "saved", "saved messages", "moi", "messages enregistrés"}
+
+
 def _resolve_dialog(client, query: str, match: int):
     """Return the single dialog best matching QUERY, or exit with a picker.
 
@@ -128,6 +132,11 @@ def _resolve_dialog(client, query: str, match: int):
     wrong chat; `--match N` disambiguates.
     """
     needle = query.lower()
+    if needle in SELF_ALIASES:
+        # "Saved Messages" is not a dialog until it holds messages, and Telethon
+        # names it after the user; the aliases make it addressable either way.
+        me = client.get_me()
+        return SimpleNamespace(entity=me, name="Saved Messages", is_user=True, is_group=False, is_channel=False)
     candidates = [d for d in client.get_dialogs() if needle in (d.name or "").lower()]
     if not candidates:
         raise click.ClickException(f"No conversation matches {query!r}.")
