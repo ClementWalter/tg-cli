@@ -93,6 +93,10 @@ folder-only sweep would otherwise miss).
 tg chats --not-in-folder Zama --limit 60 --json   # recent chats outside the Zama folder
 ```
 
+A chat already in the folder can still appear in this listing (a stale or
+unresolved peer entry, not a fold-in candidate): confirm against the actual
+`tg folder <name>` output before adding it.
+
 ### `tg folders [--json]`
 
 List chat folders (Telegram "chat folders" / dialog filters) and how many chats
@@ -110,6 +114,22 @@ against its own cutoff.
 ```bash
 tg folders                              # list folders + chat counts
 tg folder Zama --since 2026-07-05 --json
+```
+
+`--json` is a bare list of `{chat, messages: [{ts, epoch, sender, text}]}` (no
+dict wrapper); filter on `epoch` against your own UTC cutoff. `--limit` caps
+messages fetched per chat before the `--since` filter, so if a folder's newest
+messages all cluster at the window start the fetch was truncated: re-pull with a
+larger `--limit`. A folder chat count lower than a previous run's is a fetch
+failure, not a smaller folder.
+
+The call can hang on an otherwise healthy session. Wrap it in a timeout and
+retry once before treating it as a failure. macOS ships no GNU `timeout`
+binary, so use a subprocess timeout or background the call and poll:
+
+```bash
+tg folder Zama --since 2026-07-05 --json > out.json 2> err.log & pid=$!
+sleep 45; kill -0 $pid 2>/dev/null && kill $pid   # finished on its own if out.json has content
 ```
 
 ### `tg folder-add <folder> <query> [--match N] [--yes] [--json]`
@@ -170,9 +190,21 @@ tg download alice --limit 50 --out ./tg-media
 tg download "Zama x Steakhouse" --since 2026-07-05 --docs-only --out ./tg-docs
 ```
 
+`download` can hang indefinitely on a link-only chat (one with no attachments in
+the window). Wrap each call in a ~30s timeout (see the `folder` note for the
+macOS pattern) and treat a hang or an empty result as "no docs", not an error.
+Read a downloaded deck in full, not just the intro: a partner's load-bearing
+constraints usually sit in a later product-spec page.
+
 ## Notes
 
 - **Reading is non-destructive** — only `send --yes` writes anything.
-- **Timestamps** are converted from Telegram's UTC to local time.
+- **Timestamps** are converted from Telegram's UTC to local time; `--json` rows
+  also carry `epoch` (Unix seconds) where a caller filters against a cutoff.
 - Non-text messages render as a `[MediaType]` / `[ActionType]` placeholder.
 - Every read command supports `--json` for structured output.
+- **Senders.** `sender` is `me` for own messages, else the display name; a sender
+  with no resolvable name is emitted as its numeric id. Write that literal id,
+  never a name guessed from content or context.
+- **No per-message permalinks exist.** Cite a message by chat name + timestamp
+  (+ filename for an attachment).
