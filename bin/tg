@@ -148,6 +148,28 @@ def _resolve_dialog(client, query: str, match: int):
     return candidates[match - 1 if match else 0]
 
 
+def _message_dict(m) -> dict:
+    """One message as the CLI's JSON row; ids and reply links let a script follow a thread."""
+    media = None
+    if m.voice or m.audio:
+        media = {"kind": "audio", "mimetype": getattr(getattr(m, "document", None), "mime_type", None), "voice": bool(m.voice)}
+    elif m.photo:
+        media = {"kind": "image"}
+    elif m.document:
+        media = {"kind": "document", "mimetype": getattr(m.document, "mime_type", None), "file_name": getattr(m.file, "name", None) if m.file else None}
+    return {
+        "id": m.id,
+        "ts": _local(m.date),
+        "epoch": int(m.date.timestamp()) if m.date else None,
+        "sender": "me" if m.out else utils.get_display_name(m.sender) or str(m.sender_id),
+        "from_me": bool(m.out),
+        "text": _msg_text(m),
+        # The message this one replies to (Telegram's reply bubble), None otherwise.
+        "reply_to": m.reply_to_msg_id,
+        "media": media,
+    }
+
+
 def _local(dt) -> str:
     """Format a Telegram (UTC-aware) datetime in local time."""
     return dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else ""
@@ -455,15 +477,7 @@ def read(query: str, limit: int, match: int, as_json: bool) -> None:
     with _client() as client:
         dialog = _resolve_dialog(client, query, match)
         messages = client.get_messages(dialog.entity, limit=limit)
-        out = [
-            {
-                "ts": _local(m.date),
-                "sender": "me" if m.out else utils.get_display_name(m.sender)
-                or str(m.sender_id),
-                "text": _msg_text(m),
-            }
-            for m in reversed(messages)
-        ]
+        out = [_message_dict(m) for m in reversed(messages)]
         title = dialog.name
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False))
@@ -536,8 +550,9 @@ def search(text: str, chat_query: str | None, match: int, limit: int, as_json: b
 @click.option("--file", "file_path", default=None, help="Attach and send this file/document; TEXT (if any) becomes its caption.")
 @click.option("--peer", "peer_override", default=None, help="Send to this exact @username / phone / id, skipping query resolution.")
 @click.option("--match", default=0, help="Pick the Nth matching chat when ambiguous (1-based).")
+@click.option("--reply-to", "reply_to", type=int, default=None, help="Reply to this message id (from `tg read --json`), shown as a reply bubble.")
 @click.option("--yes", is_flag=True, help="Actually send. Without it, prints a dry-run only.")
-def send(query: str, text: str, file_path: str | None, peer_override: str | None, match: int, yes: bool) -> None:
+def send(query: str, text: str, file_path: str | None, peer_override: str | None, match: int, reply_to: int | None, yes: bool) -> None:
     """Send a message (and/or a file) to the chat matching QUERY.
 
     With --file, sends that document; any TEXT becomes its caption. Defaults to a
@@ -569,9 +584,9 @@ def send(query: str, text: str, file_path: str | None, peer_override: str | None
             return
 
         if attachment:
-            client.send_file(entity, str(attachment), caption=text or None)
+            client.send_file(entity, str(attachment), caption=text or None, reply_to=reply_to)
         else:
-            client.send_message(entity, text)
+            client.send_message(entity, text, reply_to=reply_to)
     what = f"file {attachment.name}" if attachment else "message"
     click.echo(f"Sent {what} to {label}.")
 
@@ -609,7 +624,7 @@ def download(query: str, limit: int, since: str | None, docs_only: bool, match: 
                 continue
             path = client.download_media(m, file=str(outdir))
             if path:
-                saved.append({"ts": _local(m.date), "file": path, "caption": _msg_text(m)})
+                saved.append({"ts": _local(m.date), "id": m.id, "reply_to": m.reply_to_msg_id, "file": path, "caption": _msg_text(m)})
     if as_json:
         click.echo(json.dumps(saved, ensure_ascii=False))
         return
