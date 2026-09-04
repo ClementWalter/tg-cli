@@ -57,7 +57,9 @@ log = logging.getLogger("tg")
 # session. The session basename is passed to Telethon, which appends `.session`.
 CONFIG_DIR = Path(os.environ.get("TG_CONFIG_DIR", Path.home() / ".config" / "tg-cli"))
 CONFIG_FILE = CONFIG_DIR / "config.json"
-SESSION_BASE = CONFIG_DIR / "session"
+# TG_SESSION names an alternate session file (e.g. "listener"), so a resident `tg listen`
+# and the one-shot commands each own a Telethon session: two clients cannot share one.
+SESSION_BASE = CONFIG_DIR / os.environ.get("TG_SESSION", "session")
 
 
 def _secure_dir() -> None:
@@ -465,6 +467,41 @@ def folder(name: str, since: str | None, limit: int, as_json: bool) -> None:
         click.echo(f"\n# {chat['chat']} — {len(chat['messages'])} messages")
         for m in chat["messages"]:
             click.echo(f"{m['ts']}  {m['sender']}: {m['text']}")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--exec", "exec_cmd", default=None, help="Shell command run for each message, its JSON on stdin (e.g. an inbox trigger).")
+@click.option("--match", default=0, help="Pick the Nth match when ambiguous (1-based).")
+@click.option("--all", "all_chats", is_flag=True, help="Every chat, not just the one matching QUERY.")
+def listen(query: str, exec_cmd: str | None, match: int, all_chats: bool) -> None:
+    """Stay connected and print each new message of the chat matching QUERY as one JSON line.
+
+    Push instead of polling: Telegram delivers updates over the open MTProto
+    connection. Outgoing messages (yours, from any device) are included, which
+    is what makes Saved Messages a live inbox. Runs until interrupted. Use a
+    dedicated session (`TG_SESSION=listener tg login`, then `TG_SESSION=listener
+    tg listen me`) so one-shot commands keep working alongside.
+    """
+    import subprocess as _sp
+
+    from telethon import events
+
+    with _client() as client:
+        entity = None if all_chats else _resolve_dialog(client, query, match).entity
+
+        @client.on(events.NewMessage(chats=None if entity is None else entity, incoming=True, outgoing=True))
+        async def _on_message(event):
+            row = _message_dict(event.message)
+            row["chat_id"] = event.chat_id
+            line = json.dumps(row, ensure_ascii=False)
+            click.echo(line)
+            sys.stdout.flush()
+            if exec_cmd:
+                _sp.Popen(exec_cmd, shell=True, stdin=_sp.PIPE, text=True).communicate(line + "\n")
+
+        click.echo(f"# listening on {'all chats' if all_chats else query}", err=True)
+        client.run_until_disconnected()
 
 
 @cli.command()
