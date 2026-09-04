@@ -621,11 +621,13 @@ def send(query: str, text: str, file_path: str | None, peer_override: str | None
             return
 
         if attachment:
-            client.send_file(entity, str(attachment), caption=text or None, reply_to=reply_to)
+            sent = client.send_file(entity, str(attachment), caption=text or None, reply_to=reply_to)
         else:
-            client.send_message(entity, text, reply_to=reply_to)
+            sent = client.send_message(entity, text, reply_to=reply_to)
     what = f"file {attachment.name}" if attachment else "message"
-    click.echo(f"Sent {what} to {label}.")
+    # The id lets a script record what it sent and route a later reply to it.
+    click.echo(f"Sent {what} to {label} (id {sent.id}).")
+    click.echo(f"sent: {sent.id}")
 
 
 @cli.command()
