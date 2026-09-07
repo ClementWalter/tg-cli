@@ -62,6 +62,29 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 SESSION_BASE = CONFIG_DIR / os.environ.get("TG_SESSION", "session")
 
 
+
+def _auth_broker(action, payload=None):
+    """Keep credential bodies on pipes and suppress provider errors containing secrets."""
+    import subprocess
+    import json
+    try:
+        result = subprocess.run(
+            ["claudine-secret", "auth", action, "telegram"],
+            input=json.dumps(payload) if payload is not None else None,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode not in (0, 3):
+            return None
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict):
+            return None
+        if action == "load" and result.returncode:
+            return None
+        return value
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
 def _secure_dir() -> None:
     """Ensure the config dir exists and is private (0700)."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -74,6 +97,13 @@ def _lock_down(path: Path) -> None:
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
+def _load_config():
+    """API credentials may travel between hosts; authenticated sessions never do."""
+    if CONFIG_FILE.with_suffix(".auth-pending").exists():
+        return json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    return _auth_broker("load") or (json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {})
+
+
 def _load_credentials() -> tuple[int, str]:
     """Return (api_id, api_hash) from env or the stored config, else fail cleanly.
 
@@ -84,8 +114,8 @@ def _load_credentials() -> tuple[int, str]:
     env_id, env_hash = os.environ.get("TG_API_ID"), os.environ.get("TG_API_HASH")
     if env_id and env_hash:
         return int(env_id), env_hash
-    if CONFIG_FILE.exists():
-        cfg = json.loads(CONFIG_FILE.read_text())
+    cfg = _load_config()
+    if cfg:
         return int(cfg["api_id"]), cfg["api_hash"]
     raise click.ClickException(
         "No API credentials found. Run `tg login` and provide the api_id / "
@@ -262,7 +292,7 @@ def login(api_id: str | None, api_hash: str | None) -> None:
     """
     _secure_dir()
     if not (api_id and api_hash):
-        stored = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+        stored = _load_config()
         api_id = api_id or (str(stored["api_id"]) if "api_id" in stored else None)
         api_hash = api_hash or stored.get("api_hash")
     # hide_input keeps every secret off the screen (and thus out of terminal
@@ -273,8 +303,15 @@ def login(api_id: str | None, api_hash: str | None) -> None:
     if not api_hash:
         api_hash = click.prompt("api_hash (from my.telegram.org)", hide_input=True)
 
+    CONFIG_FILE.touch(mode=0o600, exist_ok=True)
+    _lock_down(CONFIG_FILE)
     CONFIG_FILE.write_text(json.dumps({"api_id": int(api_id), "api_hash": api_hash}))
     _lock_down(CONFIG_FILE)
+    pending = CONFIG_FILE.with_suffix(".auth-pending")
+    if _auth_broker("save", {"api_id": int(api_id), "api_hash": api_hash}) is None:
+        pending.touch(mode=0o600)
+    else:
+        pending.unlink(missing_ok=True)
 
     client = TelegramClient(str(SESSION_BASE), int(api_id), api_hash)
     # Drive Telethon's interactive login through masked prompts rather than its
@@ -673,6 +710,40 @@ def download(query: str, limit: int, since: str | None, docs_only: bool, match: 
     click.echo(f"Saved {len(saved)} attachment(s) from {dialog.name!r} into {outdir}:")
     for s in saved:
         click.echo(f"  {s['ts']}  {s['file']}")
+
+
+
+@cli.command("auth-status")
+@click.option("--json", "as_json", is_flag=True, help="Emit secret-free metadata.")
+def auth_status(as_json):
+    """Report credential storage without contacting the provider. Example: auth-status --json."""
+    import json
+    metadata = _auth_broker("status") or {
+        "connector": "telegram", "account": "default", "source": "unavailable",
+        "configured": False, "pending": False, "last_sync": None,
+    }
+    if not metadata.get("configured") and CONFIG_FILE.exists():
+        metadata.update(source="legacy", configured=True)
+    metadata.update(session_scope="host", session_present=Path(str(SESSION_BASE) + ".session").exists(), pairing_required=not Path(str(SESSION_BASE) + ".session").exists())
+    if CONFIG_FILE.with_suffix(".auth-pending").exists():
+        metadata.update(source="pending-local", configured=True, pending=True)
+    click.echo(json.dumps(metadata))
+
+
+@cli.command("auth-sync")
+def auth_sync():
+    """Move stored credentials into 1Password. Example: auth-sync."""
+    import json
+    local_pending = CONFIG_FILE.with_suffix(".auth-pending")
+    metadata = _auth_broker("save", _load_config()) if local_pending.exists() else _auth_broker("sync")
+    if metadata and local_pending.exists():
+        local_pending.unlink()
+    if not metadata or not metadata.get("configured"):
+        config = _load_config()
+        metadata = _auth_broker("save", config) if config else metadata
+    click.echo(json.dumps(metadata or {"connector": "telegram", "source": "unavailable", "pending": False}))
+    if not metadata or not metadata.get("configured") or metadata.get("pending"):
+        raise click.exceptions.Exit(3)
 
 
 if __name__ == "__main__":
