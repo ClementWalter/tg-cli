@@ -541,17 +541,31 @@ def listen(query: str, exec_cmd: str | None, match: int, all_chats: bool) -> Non
         client.run_until_disconnected()
 
 
+def _thread_messages(client, entity, limit: int, cutoff: datetime | None) -> list:
+    """A chat's messages in chronological order: the last `limit`, or the first `limit` at/after `cutoff`."""
+    if cutoff is None:
+        return list(reversed(client.get_messages(entity, limit=limit)))
+    # reverse=True walks forward from offset_date, so a busy window is read from
+    # its start instead of being cut to the most recent `limit` messages.
+    return list(client.iter_messages(entity, limit=limit, offset_date=cutoff, reverse=True))
+
+
 @cli.command()
 @click.argument("query")
 @click.option("--limit", default=50, help="Number of messages to show.")
+@click.option("--since", default=None, help="ISO date/datetime; read from this point forward (UTC if no tz).")
 @click.option("--match", default=0, help="Pick the Nth match when ambiguous (1-based).")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
-def read(query: str, limit: int, match: int, as_json: bool) -> None:
-    """Read messages from the chat best matching QUERY (name substring)."""
+def read(query: str, limit: int, since: str | None, match: int, as_json: bool) -> None:
+    """Read messages from the chat best matching QUERY (name substring).
+
+    Without --since, shows the last --limit messages. With --since, shows the
+    first --limit messages at/after it, oldest first.
+    """
+    cutoff = _parse_since(since)
     with _client() as client:
         dialog = _resolve_dialog(client, query, match)
-        messages = client.get_messages(dialog.entity, limit=limit)
-        out = [_message_dict(m) for m in reversed(messages)]
+        out = [_message_dict(m) for m in _thread_messages(client, dialog.entity, limit, cutoff)]
         title = dialog.name
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False))

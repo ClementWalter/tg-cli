@@ -148,15 +148,20 @@ tg folder-add Zama "Zama x Ember"          # dry-run: shows the proposed add
 tg folder-add Zama "Zama x Ember" --yes    # actually add it to the folder
 ```
 
-### `tg read <query> [--limit N] [--match N] [--json]`
+### `tg read <query> [--limit N] [--since ISO] [--match N] [--json]`
 
 Show messages from the chat whose name best matches `<query>` (case-insensitive
 substring). Ambiguous matches print a numbered list — pick one with `--match N`.
+Without `--since` it shows the last `--limit` messages (default 50); with
+`--since` (ISO date/datetime, UTC if no tz) it shows the first `--limit`
+messages at/after the cutoff, oldest first, so a busy window is read from its
+start. Raise `--limit` if the output stops short of now.
 
 ```bash
 tg read alice              # most likely "Alice" chat
 tg read "Dev Team" --limit 200
 tg read alice --match 2    # 2nd match when ambiguous
+tg read "Founding Apes" --since 2026-09-28T22:00:00 --limit 200   # a day's window
 ```
 
 ### `tg search <text> [--chat QUERY] [--match N] [--limit N] [--json]`
