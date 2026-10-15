@@ -162,7 +162,14 @@ tg read alice              # most likely "Alice" chat
 tg read "Dev Team" --limit 200
 tg read alice --match 2    # 2nd match when ambiguous
 tg read "Founding Apes" --since 2026-09-28T22:00:00 --limit 200   # a day's window
+tg read alice --limit 20 --transcribe --json   # latest messages with local audio transcripts
 ```
+
+For `--transcribe`, install `transcribe-cli` so `transcribe` is on PATH on the
+machine running `tg`. Each machine needs its own `tg login`; authenticated
+sessions must not be copied between machines. Transcripts can misrecognize
+names and technical terms. See the transcription options and cache behavior
+under Notes.
 
 ### `tg search <text> [--chat QUERY] [--match N] [--limit N] [--json]`
 

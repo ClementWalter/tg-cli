@@ -38,6 +38,17 @@ and audio files and run the optional [transcribe-cli](https://github.com/Clement
 `transcribe file` command locally. Install `transcribe` on PATH first.
 Use `--transcribe-backend auto|whisper|parakeet` to choose its speech backend.
 
+```bash
+tg read alice --limit 20 --transcribe --json
+tg folder Zama --transcribe --json
+tg listen me --transcribe
+```
+
+On another machine, log in with `tg login` and make both `tg` and `transcribe`
+available on PATH. Audio processing and the transcript cache stay on the
+machine running the command. Transcripts can misrecognize names and technical
+terms.
+
 Transcription is off by default. Set `TG_TRANSCRIBE=1` to enable it by default,
 or pass `--no-transcribe` to disable it for one command. `TG_TRANSCRIBE_BACKEND`
 sets the backend default. JSON keeps the original message `text` and adds
