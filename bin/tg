@@ -34,8 +34,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,7 +63,8 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 # TG_SESSION names an alternate session file (e.g. "listener"), so a resident `tg listen`
 # and the one-shot commands each own a Telethon session: two clients cannot share one.
 SESSION_BASE = CONFIG_DIR / os.environ.get("TG_SESSION", "session")
-
+# Transcripts are private message content, so the cache dir is 0700 like the config dir.
+TRANSCRIPT_CACHE = Path(os.environ.get("TG_CACHE_DIR", Path.home() / ".cache" / "tg-cli")) / "transcripts"
 
 
 def _auth_broker(action, payload=None):
@@ -274,6 +278,123 @@ def _msg_text(msg) -> str:
     return ""
 
 
+def _transcribe_audio(path: str, backend: str) -> dict | None:
+    """Run transcribe-cli on one audio file; None (with a warning) when it fails.
+
+    A failed transcription must not abort a read, so errors degrade to the
+    untranscribed message instead of raising.
+    """
+    exe = shutil.which("transcribe") or str(Path.home() / ".local" / "bin" / "transcribe")
+    try:
+        result = subprocess.run([exe, "file", path, "--backend", backend, "--json"], capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("transcribe failed for %s: %s", path, exc)
+        return None
+    if result.returncode != 0:
+        log.warning("transcribe failed for %s: %s", path, result.stderr.strip()[-300:])
+        return None
+    try:
+        out = json.loads(result.stdout)
+        if not isinstance(out, dict) or not isinstance(out.get("text"), str):
+            raise ValueError("expected a JSON object with string text")
+    except ValueError as exc:
+        log.warning("Invalid transcribe output: %s", exc)
+        return None
+    return {"text": out["text"].strip(), "language": out.get("language")}
+
+
+def _cached_transcript(chat_id, msg_id: int, backend: str) -> str | None:
+    """Read a backend-specific cache entry; damaged entries are retried."""
+    cache = TRANSCRIPT_CACHE / f"{chat_id}_{msg_id}_{backend}.json"
+    try:
+        result = json.loads(cache.read_text())
+        if isinstance(result, dict) and isinstance(result.get("text"), str):
+            return result["text"]
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        log.warning("Cannot read transcript cache: %s", exc)
+    return None
+
+
+def _transcript(chat_id, msg_id: int, fetch, backend: str) -> str | None:
+    """Cache one audio transcript per chat, message, and requested backend.
+
+    `fetch(dir)` downloads the audio into `dir` and returns its path; it is only
+    called on a cache miss.
+    """
+    cached = _cached_transcript(chat_id, msg_id, backend)
+    if cached is not None:
+        return cached
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = fetch(tmp)
+            result = _transcribe_audio(str(path), backend) if path else None
+    except Exception as exc:
+        log.warning("Audio transcription failed for message %s: %s", msg_id, exc)
+        return None
+    if result is None:
+        return None
+    try:
+        TRANSCRIPT_CACHE.mkdir(parents=True, exist_ok=True)
+        TRANSCRIPT_CACHE.chmod(stat.S_IRWXU)
+        cache = TRANSCRIPT_CACHE / f"{chat_id}_{msg_id}_{backend}.json"
+        # Atomic replacement keeps concurrent readers away from partial JSON.
+        with tempfile.NamedTemporaryFile(mode="w", dir=TRANSCRIPT_CACHE, delete=False) as handle:
+            pending = Path(handle.name)
+            try:
+                handle.write(json.dumps(result, ensure_ascii=False))
+                handle.close()
+                pending.replace(cache)
+            finally:
+                pending.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Cannot save transcript cache: %s", exc)
+    return result["text"]
+
+
+async def _live_transcript(message, backend: str) -> str | None:
+    """Download on Telegram's event loop; run speech inference off the loop."""
+    import asyncio
+
+    cached = _cached_transcript(message.chat_id, message.id, backend)
+    if cached is not None:
+        return cached
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = await message.download_media(file=tmp)
+            return await asyncio.to_thread(
+                _transcript, message.chat_id, message.id, lambda _d: path, backend
+            )
+    except Exception as exc:
+        log.warning("Audio transcription failed for message %s: %s", message.id, exc)
+        return None
+
+
+def _add_transcripts(client, messages, rows: list[dict], backend: str) -> None:
+    """Set `transcript` on each row whose message is a voice note or audio file."""
+    for m, row in zip(messages, rows):
+        if m.voice or m.audio:
+            row["transcript"] = _transcript(m.chat_id, m.id, lambda d, m=m: client.download_media(m, file=d), backend)
+
+
+def _line_text(m: dict) -> str:
+    """Human rendering of a row's text, with an audio transcript in place of the media stub."""
+    return f"{m['text']} [transcript] {m['transcript']}" if m.get("transcript") else m["text"]
+
+
+# Off by default: Whisper costs seconds per note. TG_TRANSCRIBE=1 turns it on everywhere.
+transcribe_option = click.option(
+    "--transcribe/--no-transcribe", default=False, envvar="TG_TRANSCRIBE", show_envvar=True,
+    help="Transcribe voice notes and audio files locally via `transcribe` (transcribe-cli); adds a `transcript` field.",
+)
+transcribe_backend_option = click.option(
+    "--transcribe-backend", type=click.Choice(["auto", "whisper", "parakeet"]), default="auto",
+    envvar="TG_TRANSCRIBE_BACKEND", show_envvar=True, show_default=True,
+    help="Speech model for --transcribe (see `transcribe file --help`).",
+)
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli() -> None:
     """Read and send your own Telegram chats (user account, via Telethon)."""
@@ -456,14 +577,18 @@ def folder_add(folder: str, query: str, match: int, yes: bool, as_json: bool) ->
 @click.argument("name")
 @click.option("--since", default=None, help="ISO date/datetime; keep only messages at/after it (UTC if no tz).")
 @click.option("--limit", default=100, help="Max messages fetched per chat before the --since filter.")
+@transcribe_option
+@transcribe_backend_option
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
-def folder(name: str, since: str | None, limit: int, as_json: bool) -> None:
+def folder(name: str, since: str | None, limit: int, transcribe: bool, transcribe_backend: str, as_json: bool) -> None:
     """Read recent messages from every chat in the folder matching NAME.
 
     Windowed batch read across a whole folder — the building block a digest job
     uses: enumerate the folder's chats, fetch each chat's recent messages, and
     keep those at/after --since. Each message carries an `epoch` field so a
     caller can filter precisely against its own cutoff.
+
+    Example: tg folder Zama --transcribe --json
     """
     cutoff = _parse_since(since)
     needle = name.lower()
@@ -482,7 +607,7 @@ def folder(name: str, since: str | None, limit: int, as_json: bool) -> None:
         out = []
         for peer in _folder_peers(chosen):
             entity = client.get_entity(peer)
-            messages = client.get_messages(entity, limit=limit)
+            messages = [m for m in reversed(client.get_messages(entity, limit=limit)) if cutoff is None or m.date >= cutoff]
             rows = [
                 {
                     "ts": _local(m.date),
@@ -491,9 +616,10 @@ def folder(name: str, since: str | None, limit: int, as_json: bool) -> None:
                     or str(m.sender_id),
                     "text": _msg_text(m),
                 }
-                for m in reversed(messages)
-                if cutoff is None or m.date >= cutoff
+                for m in messages
             ]
+            if transcribe:
+                _add_transcripts(client, messages, rows, transcribe_backend)
             out.append({"chat": utils.get_display_name(entity), "messages": rows})
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False))
@@ -503,7 +629,7 @@ def folder(name: str, since: str | None, limit: int, as_json: bool) -> None:
             continue
         click.echo(f"\n# {chat['chat']} — {len(chat['messages'])} messages")
         for m in chat["messages"]:
-            click.echo(f"{m['ts']}  {m['sender']}: {m['text']}")
+            click.echo(f"{m['ts']}  {m['sender']}: {_line_text(m)}")
 
 
 @cli.command()
@@ -511,7 +637,9 @@ def folder(name: str, since: str | None, limit: int, as_json: bool) -> None:
 @click.option("--exec", "exec_cmd", default=None, help="Shell command run for each message, its JSON on stdin (e.g. an inbox trigger).")
 @click.option("--match", default=0, help="Pick the Nth match when ambiguous (1-based).")
 @click.option("--all", "all_chats", is_flag=True, help="Every chat, not just the one matching QUERY.")
-def listen(query: str, exec_cmd: str | None, match: int, all_chats: bool) -> None:
+@transcribe_option
+@transcribe_backend_option
+def listen(query: str, exec_cmd: str | None, match: int, all_chats: bool, transcribe: bool, transcribe_backend: str) -> None:
     """Stay connected and print each new message of the chat matching QUERY as one JSON line.
 
     Push instead of polling: Telegram delivers updates over the open MTProto
@@ -519,6 +647,8 @@ def listen(query: str, exec_cmd: str | None, match: int, all_chats: bool) -> Non
     is what makes Saved Messages a live inbox. Runs until interrupted. Use a
     dedicated session (`TG_SESSION=listener tg login`, then `TG_SESSION=listener
     tg listen me`) so one-shot commands keep working alongside.
+
+    Example: tg listen me --transcribe
     """
     import subprocess as _sp
 
@@ -529,8 +659,11 @@ def listen(query: str, exec_cmd: str | None, match: int, all_chats: bool) -> Non
 
         @client.on(events.NewMessage(chats=None if entity is None else entity, incoming=True, outgoing=True))
         async def _on_message(event):
-            row = _message_dict(event.message)
+            m = event.message
+            row = _message_dict(m)
             row["chat_id"] = event.chat_id
+            if transcribe and (m.voice or m.audio):
+                row["transcript"] = await _live_transcript(m, transcribe_backend)
             line = json.dumps(row, ensure_ascii=False)
             click.echo(line)
             sys.stdout.flush()
@@ -555,24 +688,31 @@ def _thread_messages(client, entity, limit: int, cutoff: datetime | None) -> lis
 @click.option("--limit", default=50, help="Number of messages to show.")
 @click.option("--since", default=None, help="ISO date/datetime; read from this point forward (UTC if no tz).")
 @click.option("--match", default=0, help="Pick the Nth match when ambiguous (1-based).")
+@transcribe_option
+@transcribe_backend_option
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
-def read(query: str, limit: int, since: str | None, match: int, as_json: bool) -> None:
+def read(query: str, limit: int, since: str | None, match: int, transcribe: bool, transcribe_backend: str, as_json: bool) -> None:
     """Read messages from the chat best matching QUERY (name substring).
 
     Without --since, shows the last --limit messages. With --since, shows the
     first --limit messages at/after it, oldest first.
+
+    Example: tg read alice --transcribe --json
     """
     cutoff = _parse_since(since)
     with _client() as client:
         dialog = _resolve_dialog(client, query, match)
-        out = [_message_dict(m) for m in _thread_messages(client, dialog.entity, limit, cutoff)]
+        messages = _thread_messages(client, dialog.entity, limit, cutoff)
+        out = [_message_dict(m) for m in messages]
+        if transcribe:
+            _add_transcripts(client, messages, out, transcribe_backend)
         title = dialog.name
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False))
         return
     click.echo(f"# {title} — {len(out)} messages\n")
     for m in out:
-        click.echo(f"{m['ts']}  {m['sender']}: {m['text']}")
+        click.echo(f"{m['ts']}  {m['sender']}: {_line_text(m)}")
 
 
 @cli.command()

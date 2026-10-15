@@ -203,6 +203,18 @@ constraints usually sit in a later product-spec page.
 
 ## Notes
 
+- **Optional transcription.** `read`, `folder`, and `listen` accept
+  `--transcribe/--no-transcribe` and `--transcribe-backend auto|whisper|parakeet`.
+  They download voice notes and audio files and call `transcribe file` locally;
+  `transcribe` must be installed on PATH. Off by default; `TG_TRANSCRIBE=1`
+  enables it, `TG_TRANSCRIBE_BACKEND` selects the backend. JSON preserves `text`
+  and adds `transcript` to audio rows (null on failure); human output includes
+  the transcript. Errors warn on stderr without dropping the message.
+  Audio downloads are temporary; transcripts persist in
+  `~/.cache/tg-cli/transcripts` (`TG_CACHE_DIR` overrides the cache root), keyed
+  by chat, message, and requested backend, with directory/file modes 0700/0600.
+  Delete entries to retranscribe. Example: `tg read alice --transcribe --json`.
+
 - **Reading is non-destructive** — only `send --yes` writes anything.
 - **Timestamps** are converted from Telegram's UTC to local time; `--json` rows
   also carry `epoch` (Unix seconds) where a caller filters against a cutoff.
