@@ -1,5 +1,7 @@
 # tg-cli
 
+**Visibility: public.**
+
 Read and send your **own** Telegram chats from the terminal. It logs in as your
 Telegram user account over MTProto (via [Telethon](https://docs.telethon.dev)),
 so it sees everything your account sees — the Telegram counterpart to the
@@ -10,7 +12,7 @@ personal DMs, so a user-account client is the only way to read your own history.
 
 ## Install / run
 
-`tg` is a single self-contained script run via
+`tg` is a single self-contained script (`tg_cli.py`, linked as `bin/tg`) run via
 [uv](https://docs.astral.sh/uv/) with inline PEP 723 dependencies — no virtualenv
 setup. The only dependencies are `click` and `telethon`, both version-pinned, so
 the entire codebase you run is this one readable file plus those two libraries.
@@ -78,3 +80,9 @@ Telegram app: **Settings → Devices → terminate**. Enable a 2FA password on t
 account.
 
 See [SKILL.md](SKILL.md) for the agent-facing command reference.
+
+## Tests
+
+```bash
+for t in tests/test_*.py; do uv run --script "$t"; done
+```

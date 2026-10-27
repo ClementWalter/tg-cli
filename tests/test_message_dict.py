@@ -1,3 +1,15 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "click==8.3.3",
+#     "telethon==1.44.0",
+#     "pytest==9.1.1",
+# ]
+#
+# [tool.uv]
+# exclude-newer = "2026-10-27T00:00:00Z"
+# ///
 """The JSON row `tg read --json` emits, built from a stub Telethon message."""
 
 from __future__ import annotations
@@ -9,7 +21,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-loader = importlib.machinery.SourceFileLoader("tg_cli", str(Path(__file__).parent.parent / "bin" / "tg"))
+loader = importlib.machinery.SourceFileLoader("tg_cli", str(Path(__file__).parent.parent / "tg_cli.py"))
 spec = importlib.util.spec_from_loader("tg_cli", loader)
 tg = importlib.util.module_from_spec(spec)
 sys.modules["tg_cli"] = tg
@@ -36,3 +48,9 @@ def test_voice_note_is_audio_media():
     doc = SimpleNamespace(mime_type="audio/ogg")
     row = tg._message_dict(message(voice=True, document=doc))
     assert row["media"] == {"kind": "audio", "mimetype": "audio/ogg", "voice": True}
+
+
+if __name__ == "__main__":
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-q"]))
