@@ -1,3 +1,15 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "click==8.3.3",
+#     "telethon==1.44.0",
+#     "pytest==9.1.1",
+# ]
+#
+# [tool.uv]
+# exclude-newer = "2026-10-27T00:00:00Z"
+# ///
 """Optional transcription preserves Telegram messages across provider failures."""
 
 import asyncio
@@ -17,7 +29,7 @@ from click.testing import CliRunner
 @pytest.fixture
 def app(monkeypatch, tmp_path):
     loader = importlib.machinery.SourceFileLoader(
-        "tg_transcription", str(Path(__file__).resolve().parents[1] / "bin/tg")
+        "tg_transcription", str(Path(__file__).resolve().parents[1] / "tg_cli.py")
     )
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
@@ -225,3 +237,7 @@ def test_json_read_survives_download_failure(app, telegram):
     telegram[1].download_media = download
     result = CliRunner().invoke(app.cli, ["read", "Alice", "--transcribe", "--json"])
     assert json.loads(result.stdout)[0]["transcript"] is None
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
