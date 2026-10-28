@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "click==8.3.3",
+#     "qrcode==8.2",
 #     "telethon==1.44.0",
 # ]
 #
@@ -27,6 +28,10 @@ Two facts drive the design and the security posture:
   my.telegram.org (My Applications) and identify the client app, not you. They
   are read from `~/.config/tg-cli/config.json` or the `TG_API_ID` / `TG_API_HASH`
   environment variables; `login` prompts for them once and stores them.
+
+`link` is the login for callers without a terminal (an MCP client such as
+Claude Desktop): it starts a background helper that serves a local page with a
+QR code to scan from the Telegram app, plus a field for the 2FA password.
 
 Reading is non-destructive. Only `send --yes` writes anything (an outgoing
 message) — an outbound action the calling agent must confirm with the user first.
@@ -145,7 +150,7 @@ def _client():
     client.connect()
     try:
         if not client.is_user_authorized():
-            raise click.ClickException("Not logged in. Run `tg login` first.")
+            raise click.ClickException("Not logged in. Run `tg link` (QR code, no terminal needed) or `tg login`.")
         yield client
     finally:
         client.disconnect()
@@ -427,15 +432,7 @@ def login(api_id: str | None, api_hash: str | None) -> None:
     if not api_hash:
         api_hash = click.prompt("api_hash (from my.telegram.org)", hide_input=True)
 
-    CONFIG_FILE.touch(mode=0o600, exist_ok=True)
-    _lock_down(CONFIG_FILE)
-    CONFIG_FILE.write_text(json.dumps({"api_id": int(api_id), "api_hash": api_hash}))
-    _lock_down(CONFIG_FILE)
-    pending = CONFIG_FILE.with_suffix(".auth-pending")
-    if _auth_broker("save", {"api_id": int(api_id), "api_hash": api_hash}) is None:
-        pending.touch(mode=0o600)
-    else:
-        pending.unlink(missing_ok=True)
+    _store_credentials(api_id, api_hash)
 
     client = TelegramClient(str(SESSION_BASE), int(api_id), api_hash)
     # Drive Telethon's interactive login through masked prompts rather than its
@@ -449,6 +446,181 @@ def login(api_id: str | None, api_hash: str | None) -> None:
     me = client.get_me()
     client.disconnect()
     click.echo(f"Logged in as {utils.get_display_name(me)} (@{me.username or me.id}).")
+
+
+LINK_STATE = CONFIG_DIR / "link.json"
+LINK_TIMEOUT = 300
+LINK_PAGE = """<!doctype html><meta charset=utf-8><title>Link Telegram</title>
+<style>body{font:16px system-ui;max-width:28rem;margin:3rem auto;text-align:center}svg{width:16rem;height:16rem}</style>
+<h1>Link Telegram</h1><div id=s>Starting…</div>
+<form id=f hidden><p>Your account has a 2FA password:</p><input type=password id=p autofocus> <button>Send</button></form>
+<script>
+const f=document.getElementById('f'),s=document.getElementById('s');
+f.onsubmit=e=>{e.preventDefault();fetch('password',{method:'POST',body:document.getElementById('p').value});f.hidden=true};
+async function tick(){const r=await (await fetch('state')).json();
+ if(r.step==='qr')s.innerHTML='<p>On your phone: Telegram → Settings → Devices → <b>Link Desktop Device</b>, then scan:</p>'+r.svg;
+ else if(r.step==='password'){s.textContent=r.error||'';f.hidden=false}
+ else if(r.step==='done'){s.textContent='Linked as '+r.name+'. You can close this page.';return}
+ else if(r.step==='failed'){s.textContent='Failed: '+r.error;return}
+ setTimeout(tick,1000)}
+tick();
+</script>"""
+
+
+def _qr_svg(url: str) -> str:
+    import qrcode
+    import qrcode.image.svg
+
+    return qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage).to_string(encoding="unicode")
+
+
+def _store_credentials(api_id: str, api_hash: str) -> None:
+    """Write api_id/api_hash chmod 600 and hand them to the vault when there is one."""
+    CONFIG_FILE.touch(mode=0o600, exist_ok=True)
+    _lock_down(CONFIG_FILE)
+    CONFIG_FILE.write_text(json.dumps({"api_id": int(api_id), "api_hash": api_hash}))
+    _lock_down(CONFIG_FILE)
+    pending = CONFIG_FILE.with_suffix(".auth-pending")
+    if _auth_broker("save", {"api_id": int(api_id), "api_hash": api_hash}) is None:
+        pending.touch(mode=0o600)
+    else:
+        pending.unlink(missing_ok=True)
+
+
+def _link_helper() -> None:
+    """Serve the QR page on 127.0.0.1 and drive Telethon's QR login until done or timed out."""
+    import asyncio
+    import secrets
+    import threading
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
+
+    api_id, api_hash = _load_credentials()
+    state: dict = {"step": "starting"}
+    passwords: list[str] = []
+    # A random path keeps other local pages and processes from reading the QR.
+    token = secrets.token_urlsafe(16)
+
+    class Page(BaseHTTPRequestHandler):
+        def _send(self, body: str, kind: str) -> None:
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path == f"/{token}/":
+                self._send(LINK_PAGE, "text/html; charset=utf-8")
+            elif self.path == f"/{token}/state":
+                self._send(json.dumps(state), "application/json")
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            if self.path != f"/{token}/password":
+                self.send_error(404)
+                return
+            passwords.append(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+            self._send("{}", "application/json")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/{token}/"
+    LINK_STATE.write_text(json.dumps({"url": url, "pid": os.getpid()}))
+    _lock_down(LINK_STATE)
+    webbrowser.open(url)
+
+    async def password() -> str:
+        while not passwords:
+            await asyncio.sleep(0.5)
+        return passwords.pop()
+
+    async def drive() -> None:
+        client = TelegramClient(str(SESSION_BASE), api_id, api_hash)
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                qr = await client.qr_login()
+                while True:
+                    state.update(step="qr", svg=_qr_svg(qr.url))
+                    try:
+                        await qr.wait()
+                        break
+                    except asyncio.TimeoutError:
+                        await qr.recreate()
+                    except SessionPasswordNeededError:
+                        state.update(step="password", svg=None, error=None)
+                        while True:
+                            try:
+                                await client.sign_in(password=await password())
+                                break
+                            except PasswordHashInvalidError:
+                                state.update(step="password", error="Wrong password, try again.")
+                        break
+            me = await client.get_me()
+            _lock_down(Path(str(SESSION_BASE) + ".session"))
+            state.update(step="done", svg=None, name=utils.get_display_name(me))
+        finally:
+            await client.disconnect()
+
+    try:
+        asyncio.run(asyncio.wait_for(drive(), LINK_TIMEOUT))
+    except Exception as exc:  # noqa: BLE001 — shown on the page; the helper has no other reader
+        state.update(step="failed", svg=None, error=str(exc) or type(exc).__name__)
+    # Let the page poll the final state before the server goes away.
+    import time
+
+    time.sleep(5)
+    server.shutdown()
+    LINK_STATE.unlink(missing_ok=True)
+
+
+@cli.command(epilog="\b\nExamples:\n  tg link\n  tg link --api-id 12345 --api-hash 0123456789abcdef0123456789abcdef")
+@click.option("--api-id", "api_id", default=None, hidden=True, help="Telegram api_id, stored for later runs.")
+@click.option("--api-hash", "api_hash", default=None, hidden=True, help="Telegram api_hash, stored for later runs.")
+@click.option("--helper", is_flag=True, hidden=True, help="Run the page and login in this process.")
+def link(api_id: str | None, api_hash: str | None, helper: bool) -> None:
+    """Link this device to your Telegram account by scanning a QR code; no terminal needed.
+
+    Opens a local page in the browser showing a QR code; scan it from the Telegram
+    app (Settings → Devices → Link Desktop Device) and enter the 2FA password there
+    if asked. Returns at once: check the result with `whoami`. The page stays up
+    for 5 minutes. Needs api_id / api_hash: from TG_API_ID / TG_API_HASH (the
+    Claude Desktop extension's settings), the stored config, or the options.
+    """
+    _secure_dir()
+    if api_id and api_hash:
+        _store_credentials(api_id, api_hash)
+    if helper:
+        _link_helper()
+        return
+    _load_credentials()
+    LINK_STATE.unlink(missing_ok=True)
+    # Detached so the page outlives this command, which an MCP client waits on.
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "link", "--helper"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    import time
+
+    for _ in range(100):
+        if LINK_STATE.exists():
+            url = json.loads(LINK_STATE.read_text())["url"]
+            click.echo(
+                f"A page opened in the browser ({url}). On your phone: Telegram → Settings → Devices → "
+                "Link Desktop Device, scan the QR code, and type your 2FA password on the page if asked. "
+                "Then check with `tg whoami`."
+            )
+            return
+        time.sleep(0.1)
+    raise click.ClickException("the link page did not start; run `tg link --helper` to see why")
 
 
 @cli.command(epilog="\b\nExamples:\n  tg logout")
@@ -881,6 +1053,8 @@ def auth_status(as_json):
     }
     if not metadata.get("configured") and CONFIG_FILE.exists():
         metadata.update(source="legacy", configured=True)
+    if not metadata.get("configured") and os.environ.get("TG_API_ID") and os.environ.get("TG_API_HASH"):
+        metadata.update(source="env", configured=True)
     metadata.update(session_scope="host", session_present=Path(str(SESSION_BASE) + ".session").exists(), pairing_required=not Path(str(SESSION_BASE) + ".session").exists())
     if CONFIG_FILE.with_suffix(".auth-pending").exists():
         metadata.update(source="pending-local", configured=True, pending=True)

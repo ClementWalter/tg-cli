@@ -48,6 +48,13 @@ a PEP 723 script — `uv` resolves deps inline on first run: `click` +
    first time), then for your **phone number**, the **login code** Telegram
    sends you, and your **2FA password** if you have one set.
 
+Without a terminal (Claude Desktop, Cowork), use `tg link` instead of step 2:
+it returns at once and opens a local page with a QR code. On the phone,
+Telegram → Settings → Devices → **Link Desktop Device**, scan it, and type the
+2FA password on the page if asked; then `tg whoami` confirms. The page stays up
+5 minutes. The api_id / api_hash come from `TG_API_ID` / `TG_API_HASH` (the
+extension's settings) or the stored config.
+
 Credentials and the authenticated session are written `chmod 600` inside a
 `chmod 700` `~/.config/tg-cli/` (override with `TG_CONFIG_DIR`, or inject creds
 via `TG_API_ID` / `TG_API_HASH`).
@@ -100,6 +107,7 @@ tg send <query> [text] [--file PATH] [--peer P] [--match N] [--reply-to ID] [--y
 tg folder-add <folder> <query> [--match N] [--yes] [--json]
 # Auth
 tg login [--api-id ID] [--api-hash HASH]   # interactive, one-time
+tg link                                    # QR code page, no terminal needed
 tg logout
 tg auth-status [--json]
 tg auth-sync
