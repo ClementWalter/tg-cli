@@ -86,3 +86,9 @@ See [SKILL.md](SKILL.md) for the agent-facing command reference.
 ```bash
 for t in tests/test_*.py; do uv run --script "$t"; done
 ```
+
+## Privacy Policy
+
+The Claude Desktop extension built from this repository keeps your data on your
+Mac and talks only to the service it connects to. Full policy:
+<https://clementwalter.github.io/claude-extensions/privacy/>
