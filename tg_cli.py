@@ -130,8 +130,9 @@ def _load_credentials() -> tuple[int, str]:
     if cfg:
         return int(cfg["api_id"]), cfg["api_hash"]
     raise click.ClickException(
-        "No API credentials found. Run `tg login` and provide the api_id / "
-        "api_hash from https://my.telegram.org (API development tools)."
+        "No API credentials found. Get an api_id / api_hash from https://my.telegram.org "
+        "(API development tools), then enter them in Claude Desktop → Settings → Extensions → "
+        "Telegram, or run `tg login` in a terminal."
     )
 
 
